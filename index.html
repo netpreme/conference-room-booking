@@ -236,6 +236,10 @@
     }
     .detail { font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; }
     .detail span { color: var(--text); }
+    .banner { border-radius: var(--radius-md); padding: 10px 14px; font-size: 13px; margin-bottom: 1rem; }
+    .error-banner { background: var(--red-bg); color: var(--red-text); border: 0.5px solid var(--red); }
+    .ok-banner { background: var(--green-bg); color: var(--text); border: 0.5px solid var(--green); }
+    .modal-actions button:disabled { opacity: 0.6; cursor: default; }
     .hint { font-size: 12px; color: var(--text-tertiary); margin-top: 4px; line-height: 1.5; }
 
     @media (max-width: 520px) {
@@ -269,6 +273,7 @@ const ROOMS = ['204', '202'];
 const DAY_START = 8 * 60;   // 8:00, in minutes
 const DAY_END = 18 * 60;    // 18:00
 const STEP = 15;            // minutes per slot
+const TZ = 'America/Los_Angeles';   // Santa Clara office
 const SLOT_H = 22;          // px per slot
 
 const COLORS = [
@@ -304,6 +309,12 @@ function isConfigured() {
   return FIREBASE_CONFIG.databaseURL && FIREBASE_CONFIG.databaseURL.length > 0;
 }
 
+// Connection to the booking database. While it's down, bookings only exist in this
+// browser tab and nobody else can see them, so we say so loudly.
+let connected = false;
+let everConnected = false;
+let notice = '';
+
 function initFirebase() {
   firebase.initializeApp(FIREBASE_CONFIG);
   db = firebase.database();
@@ -312,6 +323,27 @@ function initFirebase() {
     renderMain();
     if (modal?.type === 'view') renderModal();
   });
+  db.ref('.info/connected').on('value', snap => {
+    connected = snap.val() === true;
+    if (connected) everConnected = true;
+    renderMain();
+  });
+  // Give the first connection a few seconds before warning about it.
+  setTimeout(renderMain, 5000);
+}
+
+function showNotice(text) {
+  notice = text;
+  renderMain();
+  setTimeout(() => { if (notice === text) { notice = ''; renderMain(); } }, 4000);
+}
+
+// Resolves once the server has the write; rejects if it refuses it or takes too long.
+function serverWrite(promise, ms = 10000) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
+  ]);
 }
 
 // \u2500\u2500 Helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -326,39 +358,58 @@ function colorFor(name) {
   return COLORS[h % COLORS.length];
 }
 
+// \u2500\u2500 Pacific time \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// Everything runs on Santa Clara time, whatever the viewer's computer clock is set to.
+// A calendar day is a Date at UTC midnight, read with getUTC* (it marks a date, not an instant).
+
+const PT_PARTS = new Intl.DateTimeFormat('en-US', {
+  timeZone: TZ, year: 'numeric', month: 'numeric', day: 'numeric',
+  hour: 'numeric', minute: 'numeric', second: 'numeric', hourCycle: 'h23',
+});
+
+function ptParts(ms) {
+  const p = {};
+  for (const { type, value } of PT_PARTS.formatToParts(ms)) p[type] = Number(value);
+  return p;
+}
+
+// The instant when Pacific wall-clock reads y-m-d 00:00 plus `mins` minutes.
+function ptInstant(y, m, d, mins) {
+  const wall = Date.UTC(y, m - 1, d, 0, mins);
+  let ms = wall;
+  for (let i = 0; i < 2; i++) {   // second pass settles DST changeover days
+    const p = ptParts(ms);
+    ms += wall - Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+  }
+  return ms;
+}
+
+function ptDay(ms) { const p = ptParts(ms); return new Date(Date.UTC(p.year, p.month - 1, p.day)); }
+
 function getWeekDates(offset) {
-  const now = new Date();
-  const dow = now.getDay();
-  const monday = new Date(now);
-  monday.setHours(0, 0, 0, 0);
-  monday.setDate(now.getDate() - (dow === 0 ? 6 : dow - 1) + offset * 7);
+  const today = ptDay(Date.now());
+  const dow = today.getUTCDay();
+  const monday = new Date(today);
+  monday.setUTCDate(today.getUTCDate() - (dow === 0 ? 6 : dow - 1) + offset * 7);
   return Array.from({ length: 5 }, (_, i) => {
     const d = new Date(monday);
-    d.setDate(monday.getDate() + i);
+    d.setUTCDate(monday.getUTCDate() + i);
     return d;
   });
 }
 
-function sameDay(a, b) {
-  a = new Date(a); b = new Date(b);
-  return a.getDate() === b.getDate() && a.getMonth() === b.getMonth() && a.getFullYear() === b.getFullYear();
-}
-function isToday(d) { return sameDay(d, Date.now()); }
+function onDay(day, ms) { return ptDay(ms).getTime() === day.getTime(); }
+function samePtDay(a, b) { return ptDay(a).getTime() === ptDay(b).getTime(); }
+function isToday(day) { return onDay(day, Date.now()); }
 
-// Local date (not UTC) so the key doesn't shift for evening users west of UTC.
-function weekKey(dates) {
-  const d = dates[0];
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
+function weekKey(dates) { return dates[0].toISOString().slice(0, 10); }
 
 function slotTime(date, slot) {
-  const d = new Date(date);
-  d.setHours(0, DAY_START + slot * STEP, 0, 0);
-  return d.getTime();
+  return ptInstant(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate(), DAY_START + slot * STEP);
 }
 
-function minsOfDay(ms) { const d = new Date(ms); return d.getHours() * 60 + d.getMinutes(); }
-function fmt(ms) { return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
+function minsOfDay(ms) { const p = ptParts(ms); return p.hour * 60 + p.minute; }
+function fmt(ms) { return new Date(ms).toLocaleTimeString([], { timeZone: TZ, hour: 'numeric', minute: '2-digit' }); }
 function timeRange(b) { return `${hm(minsOfDay(b.startAt))} \u2013 ${hm(minsOfDay(b.endAt))}`; }
 
 function roomBookings(r) {
@@ -370,7 +421,7 @@ function roomBookings(r) {
 // Bookings in the shown week, tagged with the weekday column they fall in.
 function weekBookings(r, dates) {
   return roomBookings(r)
-    .map(b => ({ ...b, col: dates.findIndex(d => sameDay(d, b.startAt)) }))
+    .map(b => ({ ...b, col: dates.findIndex(d => onDay(d, b.startAt)) }))
     .filter(b => b.col >= 0);
 }
 
@@ -390,7 +441,7 @@ function roomStatus(r, now) {
     .sort((a, b) => a.startAt - b.startAt);
   const cur = upcoming.find(b => b.startAt <= now);
   if (cur) return { busy: true, text: `${cur.organizer || 'Someone'} \u00b7 ${cur.title} \u00b7 until ${fmt(cur.endAt)}` };
-  const next = upcoming.find(b => sameDay(b.startAt, now));
+  const next = upcoming.find(b => samePtDay(b.startAt, now));
   return { busy: false, text: next ? `Free until ${fmt(next.startAt)} (${next.organizer || 'booked'})` : 'Free for the rest of the day' };
 }
 
@@ -429,20 +480,44 @@ function confirmBooking() {
   const endAt = slotTime(dates[modal.day], endSlot);
 
   if (endAt <= Date.now()) { errEl.textContent = 'That time has already passed.'; return; }
+  if (!connected) { errEl.textContent = "Can't reach the booking server, so this wouldn't save. Check your internet, VPN or ad blocker, then reload the page."; return; }
   if (overlaps(room, startAt, endAt)) { errEl.textContent = 'That time overlaps an existing booking.'; return; }
 
-  db.ref('bookings').push({
+  const btn = document.getElementById('m-book');
+  btn.disabled = true;
+  btn.textContent = 'Saving\u2026';
+
+  const ref = db.ref('bookings').push();
+  serverWrite(ref.set({
     room, week: weekKey(dates), day: modal.day, startSlot, endSlot, startAt, endAt, title,
     organizer: profile.name,
     ...(profile.email ? { organizerEmail: profile.email } : {}),
     createdAt: firebase.database.ServerValue.TIMESTAMP,
-  }).catch(e => alert('Could not save booking: ' + e.message));
-  closeModal();
+  })).then(() => {
+    closeModal();
+    showNotice(`Booked Room ${room}, ${fmt(startAt)} \u2013 ${fmt(endAt)} PT`);
+  }).catch(e => {
+    ref.remove();   // don't leave an unsaved copy showing on this screen
+    btn.disabled = false;
+    btn.textContent = 'Book room';
+    errEl.textContent = e.message === 'timeout'
+      ? "The booking server didn't respond, so this wasn't saved. Check your internet, VPN or ad blocker, then try again."
+      : 'Could not save booking: ' + e.message;
+  });
 }
 
 function deleteBooking(id) {
-  db.ref('bookings/' + id).remove();
-  closeModal();
+  const btn = document.getElementById('m-delete');
+  btn.disabled = true;
+  btn.textContent = 'Cancelling\u2026';
+  serverWrite(db.ref('bookings/' + id).remove()).then(() => {
+    closeModal();
+    showNotice('Booking cancelled');
+  }).catch(() => {
+    btn.disabled = false;
+    btn.textContent = 'Cancel booking';
+    alert("Couldn't reach the booking server, so the booking was NOT cancelled. Check your connection and try again.");
+  });
 }
 
 function saveProfile() {
@@ -505,8 +580,8 @@ function renderMain() {
 
   const now = Date.now();
   const dates = getWeekDates(weekOffset);
-  const months = [...new Set(dates.map(d => MONTHS[d.getMonth()]))];
-  const weekLabel = `${months.join(' / ')} ${dates[0].getFullYear()}`;
+  const months = [...new Set(dates.map(d => MONTHS[d.getUTCMonth()]))];
+  const weekLabel = `${months.join(' / ')} ${dates[0].getUTCFullYear()}`;
   const wkBookings = weekBookings(room, dates);
 
   let h = `<div class="header">
@@ -520,6 +595,12 @@ function renderMain() {
       </div>
     </div>
   </div>
+  ${!connected && (everConnected || performance.now() > 5000)
+    ? `<div class="banner error-banner">${everConnected
+        ? 'Lost connection to the booking server. New bookings won\'t save until it\'s back.'
+        : 'Can\'t reach the booking server, so bookings can\'t be seen or saved. Check your internet, VPN or ad blocker, then reload.'}</div>`
+    : ''}
+  ${notice ? `<div class="banner ok-banner">${esc(notice)}</div>` : ''}
   <div class="rooms">`;
 
   ROOMS.forEach(r => {
@@ -536,7 +617,7 @@ function renderMain() {
 
   dates.forEach((d, i) => {
     const tod = isToday(d) ? ' today' : '';
-    h += `<div class="cal-head-cell${tod}"><span class="dn">${d.getDate()}</span>${DAYS[i]}</div>`;
+    h += `<div class="cal-head-cell${tod}"><span class="dn">${d.getUTCDate()}</span>${DAYS[i]}</div>`;
   });
 
   // Label each half hour; the :15/:45 rows get a hidden divider so the grid reads in half hours.
@@ -579,6 +660,7 @@ function renderMain() {
   h += `</div></div>
   <div class="legend">
     <span><span class="legend-dot"></span>Click any empty slot to book</span>
+    <span>All times are Pacific (Santa Clara)</span>
   </div>`;
 
   main.innerHTML = h;
@@ -605,7 +687,7 @@ function renderModal() {
         <div id="m-err" class="error"></div>
         <div class="modal-actions">
           <button onclick="closeModal()">Cancel</button>
-          <button class="btn-confirm" onclick="confirmBooking()">Book room</button>
+          <button id="m-book" class="btn-confirm" onclick="confirmBooking()">Book room</button>
         </div>
       </div>
     </div>`;
@@ -616,7 +698,7 @@ function renderModal() {
     } else {
       const c = colorFor(b.organizer);
       const own = isOwn(b);
-      const dayDate = new Date(b.startAt).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+      const dayDate = new Date(b.startAt).toLocaleDateString([], { timeZone: TZ, weekday: 'short', month: 'short', day: 'numeric' });
       h = `<div class="modal-bg" onclick="if(event.target===this)closeModal()">
         <div class="modal">
           <h3>${esc(b.title)}</h3>
@@ -627,7 +709,7 @@ function renderModal() {
           </div>
           <div class="detail">Booked by: <span>${esc(b.organizer || '\u2014')}</span></div>
           <div class="modal-actions">
-            ${own ? `<button class="btn-delete" onclick="deleteBooking('${modal.id}')">Cancel booking</button>` : ''}
+            ${own ? `<button id="m-delete" class="btn-delete" onclick="deleteBooking('${modal.id}')">Cancel booking</button>` : ''}
             <button onclick="closeModal()">Close</button>
           </div>
         </div>
