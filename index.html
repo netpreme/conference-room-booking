@@ -698,6 +698,7 @@ function renderModal() {
     } else {
       const c = colorFor(b.organizer);
       const own = isOwn(b);
+      const fromGcal = b.source === 'gcal';   // imported from the room's Google Calendar
       const dayDate = new Date(b.startAt).toLocaleDateString([], { timeZone: TZ, weekday: 'short', month: 'short', day: 'numeric' });
       h = `<div class="modal-bg" onclick="if(event.target===this)closeModal()">
         <div class="modal">
@@ -708,8 +709,9 @@ function renderModal() {
             <span style="font-size:13px;color:var(--text-secondary);">Room ${esc(b.room)} \u00b7 ${dayDate}</span>
           </div>
           <div class="detail">Booked by: <span>${esc(b.organizer || '\u2014')}</span></div>
+          ${fromGcal ? '<div class="detail">Booked in Google Calendar. To change or cancel it, edit the event there.</div>' : ''}
           <div class="modal-actions">
-            ${own ? `<button id="m-delete" class="btn-delete" onclick="deleteBooking('${modal.id}')">Cancel booking</button>` : ''}
+            ${own && !fromGcal ? `<button id="m-delete" class="btn-delete" onclick="deleteBooking('${modal.id}')">Cancel booking</button>` : ''}
             <button onclick="closeModal()">Close</button>
           </div>
         </div>
