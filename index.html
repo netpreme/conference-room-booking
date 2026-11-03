@@ -253,6 +253,7 @@
 <!-- Firebase SDKs -->
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
 
 <div id="root"></div>
 
@@ -274,6 +275,8 @@ const DAY_START = 8 * 60;   // 8:00, in minutes
 const DAY_END = 18 * 60;    // 18:00
 const STEP = 15;            // minutes per slot
 const TZ = 'America/Los_Angeles';   // Santa Clara office
+const DOMAIN = 'netpreme.com';      // only these Google accounts can sign in
+const ADMINS = ['alix@netpreme.com'];   // can cancel anyone's booking; keep in sync with database.rules.json
 const SLOT_H = 22;          // px per slot
 
 const COLORS = [
@@ -298,12 +301,10 @@ let db = null;
 let bookings = {};
 let weekOffset = 0;
 let modal = null;
-let editingProfile = false;
 let room = ROOMS.includes(load('rb_room')) ? load('rb_room') : ROOMS[0];
-let profile = (() => {
-  try { const p = JSON.parse(load('rb_profile')); if (p) return p; } catch {}
-  return { name: load('room208_name') || '' };   // migrate old name-only profile
-})();
+// Signed-in Google account: null until known, false when signed out.
+let profile = null;
+let signInError = '';
 
 function isConfigured() {
   return FIREBASE_CONFIG.databaseURL && FIREBASE_CONFIG.databaseURL.length > 0;
@@ -318,10 +319,23 @@ let notice = '';
 function initFirebase() {
   firebase.initializeApp(FIREBASE_CONFIG);
   db = firebase.database();
-  db.ref('bookings').on('value', snap => {
-    bookings = snap.val() || {};
-    renderMain();
-    if (modal?.type === 'view') renderModal();
+  // Bookings are only readable once signed in with a Netpreme account.
+  firebase.auth().onAuthStateChanged(user => {
+    db.ref('bookings').off();
+    bookings = {};
+    if (user && !user.email?.toLowerCase().endsWith('@' + DOMAIN)) {
+      signInError = `Please sign in with your @${DOMAIN} account.`;
+      firebase.auth().signOut();
+      return;
+    }
+    profile = user ? { name: user.displayName || user.email.split('@')[0], email: user.email } : false;
+    renderApp();
+    if (!user) return;
+    db.ref('bookings').on('value', snap => {
+      bookings = snap.val() || {};
+      renderMain();
+      if (modal?.type === 'view') renderModal();
+    }, e => showNotice("Couldn't load bookings: " + e.message));
   });
   db.ref('.info/connected').on('value', snap => {
     connected = snap.val() === true;
@@ -429,10 +443,13 @@ function overlaps(r, startAt, endAt) {
   return roomBookings(r).some(b => startAt < b.endAt && endAt > b.startAt);
 }
 
+// Older bookings were made before sign-in and may only have a typed name.
+// database.rules.json applies the same checks.
 function isOwn(b) {
-  if (b.organizerEmail && profile.email) return b.organizerEmail.toLowerCase() === profile.email.toLowerCase();
+  if (b.organizerEmail) return b.organizerEmail.toLowerCase() === profile.email.toLowerCase();
   return !!b.organizer && b.organizer.toLowerCase() === profile.name.toLowerCase();
 }
+const isAdmin = () => ADMINS.includes(profile.email.toLowerCase());
 
 // Who has the room right now, or when it's next taken today.
 function roomStatus(r, now) {
@@ -491,7 +508,7 @@ function confirmBooking() {
   serverWrite(ref.set({
     room, week: weekKey(dates), day: modal.day, startSlot, endSlot, startAt, endAt, title,
     organizer: profile.name,
-    ...(profile.email ? { organizerEmail: profile.email } : {}),
+    organizerEmail: profile.email,
     createdAt: firebase.database.ServerValue.TIMESTAMP,
   })).then(() => {
     closeModal();
@@ -520,19 +537,22 @@ function deleteBooking(id) {
   });
 }
 
-function saveProfile() {
-  const name = document.getElementById('name-input').value.trim();
-  const errEl = document.getElementById('p-err');
-  if (!name) { errEl.textContent = 'Please enter your name.'; return; }
-  profile = { ...profile, name };
-  store('rb_profile', JSON.stringify(profile));
-  store('room208_name', null);
-  editingProfile = false;
-  renderApp();
+function signIn() {
+  signInError = '';
+  const provider = new firebase.auth.GoogleAuthProvider();
+  provider.setCustomParameters({ hd: DOMAIN, prompt: 'select_account' });
+  firebase.auth().signInWithPopup(provider).catch(e => {
+    if (e.code === 'auth/popup-closed-by-user' || e.code === 'auth/cancelled-popup-request') return;
+    signInError = e.code === 'auth/popup-blocked'
+      ? 'Your browser blocked the sign-in window. Allow pop-ups for this page and try again.'
+      : 'Sign-in failed: ' + e.message;
+    renderApp();
+  });
 }
 
-function editProfile() { editingProfile = true; renderApp(); }
-function cancelProfile() { editingProfile = false; renderApp(); }
+function signOut() {
+  if (confirm(`Signed in as ${profile.email}. Sign out?`)) firebase.auth().signOut();
+}
 
 // \u2500\u2500 Screens \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
@@ -549,26 +569,22 @@ function renderSetupScreen() {
   </div>`;
 }
 
-function renderProfileScreen() {
-  const canCancel = editingProfile && profile.name;
+function renderSignInScreen() {
   document.getElementById('root').innerHTML = `
   <div class="name-screen">
     <div class="name-card">
-      <h2>Welcome to room booking</h2>
-      <p>Enter your name so others can see who has booked the room. You'll only need to do this once.</p>
-      <label for="name-input">Name</label>
-      <input id="name-input" type="text" placeholder="Your name" maxlength="40" value="${esc(profile.name)}" autofocus
-        onkeydown="if(event.key==='Enter')saveProfile()" />
-      <div id="p-err" class="error" style="margin:-6px 0 8px"></div>
-      <button onclick="saveProfile()">Continue</button>
-      ${canCancel ? '<button class="secondary" onclick="cancelProfile()">Cancel</button>' : ''}
+      <h2>Meeting room booking</h2>
+      <p>Sign in with your Netpreme Google account to see and book rooms 204 and 202.</p>
+      <div class="error" style="margin:-6px 0 8px">${esc(signInError)}</div>
+      <button onclick="signIn()">Sign in with Google</button>
     </div>
   </div>`;
 }
 
 function renderApp() {
   if (!isConfigured()) { renderSetupScreen(); return; }
-  if (!profile.name || editingProfile) { renderProfileScreen(); return; }
+  if (profile === null) { document.getElementById('root').innerHTML = ''; return; }   // checking sign-in
+  if (!profile) { renderSignInScreen(); return; }
   document.getElementById('root').innerHTML = `<div class="container" id="main"></div><div id="modal-root"></div>`;
   renderMain();
   renderModal();
@@ -587,7 +603,7 @@ function renderMain() {
   let h = `<div class="header">
     <div class="app-title">Meeting rooms</div>
     <div class="header-right">
-      <span class="user-pill" onclick="editProfile()" title="Change name">&#128100; ${esc(profile.name)}</span>
+      <span class="user-pill" onclick="signOut()" title="${esc(profile.email)} \u00b7 click to sign out">&#128100; ${esc(profile.name)}</span>
       <div class="nav">
         <button onclick="weekOffset--;renderMain()" aria-label="Previous week">&#8592;</button>
         <span class="week-label">${weekLabel}</span>
@@ -711,7 +727,7 @@ function renderModal() {
           <div class="detail">Booked by: <span>${esc(b.organizer || '\u2014')}</span></div>
           ${fromGcal ? '<div class="detail">Booked in Google Calendar. To change or cancel it, edit the event there.</div>' : ''}
           <div class="modal-actions">
-            ${own && !fromGcal ? `<button id="m-delete" class="btn-delete" onclick="deleteBooking('${modal.id}')">Cancel booking</button>` : ''}
+            ${(own || isAdmin()) && !fromGcal ? `<button id="m-delete" class="btn-delete" onclick="deleteBooking('${modal.id}')">Cancel booking</button>` : ''}
             <button onclick="closeModal()">Close</button>
           </div>
         </div>
@@ -725,7 +741,7 @@ function renderModal() {
 // \u2500\u2500 Boot \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 Object.assign(window, {
   openNew, openView, closeModal, confirmBooking, deleteBooking,
-  saveProfile, editProfile, cancelProfile, selectRoom, renderMain,
+  signIn, signOut, selectRoom, renderMain,
 });
 
 if (isConfigured()) {
